@@ -12,14 +12,13 @@ from tqdm import tqdm
 import os
 import datetime
 
-# 导入我们创建的模块
+# import our own modules
 from bayesian_transformer import BayesianTransformer
 from data_generator import SyntheticDataGenerator
 
-# --- 辅助函数 ---
 
 def train_step(model, optimizer, kl_loss_fn, ce_loss_fn, kl_weight, tokens, targets, device, grad_clip_value):
-    """执行一个训练步骤 (已加入梯度裁剪)"""
+    """one training step (gradient clip added to avoid explosion of grad)"""
     tokens, targets = tokens.to(device), targets.to(device)
     optimizer.zero_grad()
     
@@ -30,14 +29,12 @@ def train_step(model, optimizer, kl_loss_fn, ce_loss_fn, kl_weight, tokens, targ
     
     total_loss.backward()
     
-    # <--- 核心改动：在 optimizer.step() 之前进行梯度裁剪 --->
     torch.nn.utils.clip_grad_norm_(model.parameters(), grad_clip_value)
     
     optimizer.step()
     return prediction_loss.item(), kl.item()
 
 
-# evaluate, get_mean_variances, plot_and_save_curves 函数保持不变
 @torch.no_grad()
 def evaluate(model, data_generator, device, n_batches=10, n_samples=10):
     model.eval()
@@ -65,7 +62,7 @@ def get_mean_variances(model):
     return variances
     
 def plot_and_save_curves(results, save_dir):
-    # 1. 损失曲线
+    # 1. loss curve
     plt.figure(figsize=(12, 5))
     plt.subplot(1, 2, 1)
     plt.plot(results['train_steps'], results['pred_losses'])
@@ -82,7 +79,7 @@ def plot_and_save_curves(results, save_dir):
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, 'loss_curves.png'))
     plt.close()
-    # 2. 准确率曲线
+    # 2. accuracy curve
     plt.figure(figsize=(6, 5))
     plt.plot(results['eval_steps'], results['eval_accuracies'])
     plt.title("Evaluation Accuracy on Clean Test Set (alpha=0)")
@@ -92,7 +89,7 @@ def plot_and_save_curves(results, save_dir):
     plt.tight_layout()
     plt.savefig(os.path.join(save_dir, 'accuracy_curve.png'))
     plt.close()
-    # 3. 方差曲线
+    # 3. variance curve
     plt.figure(figsize=(10, 6))
     for layer_name, var_curve in results['mean_variances'].items():
         plt.plot(results['eval_steps'], var_curve, label=layer_name)
@@ -107,60 +104,58 @@ def plot_and_save_curves(results, save_dir):
     plt.close()
 
 
-# --- 主函数 ---
 
 def main():
-    # --- 1. 设置与初始化 ---
+    # --- 1. initialization ---
     timestamp = datetime.datetime.now().strftime('%Y-%m-%d_%H-%M-%S')
     SAVE_DIR = os.path.join('results', f'results_{timestamp}')
     os.makedirs(SAVE_DIR, exist_ok=True)
-    print(f"结果将保存到: {SAVE_DIR}")
+    print(f"results will be saved to: {SAVE_DIR}")
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"使用设备: {device}")
+    print(f"using device: {device}")
     
     META_PATH = 'data/meta.pkl'
     try:
         with open(META_PATH, 'rb') as f:
             meta = pickle.load(f)
     except FileNotFoundError:
-        print(f"错误: 找不到 '{META_PATH}'。请先运行 'prepare.py' 脚本。")
+        print(f"ERROR: connot find '{META_PATH}'. Please run 'prepare.py' script first.")
         return
         
     global VOCAB_SIZE, BATCH_SIZE
     VOCAB_SIZE = meta['vocab_size']
     
-    # --- 训练配置 ---
+    # --- training config ---
     K_TRIGGERS = 1
     ALPHA = 0.5
     SEQ_LEN = 256
     D_MODEL = 256
     BATCH_SIZE = 128
     
-    # <--- 方案一: 降低学习率 --->
     LEARNING_RATE = 1e-5
     
-    # <--- 方案二: 设置梯度裁剪值 --->
     GRAD_CLIP_VALUE = 10.0
     
-    NUM_BATCHES = 2000
+    NUM_BATCHES = 2000 # seems too much for a 64 vocab size
     KL_WEIGHT = 1.0 / NUM_BATCHES
 
-    # --- 评估配置 ---
+    # --- eval config ---
     EVAL_INTERVAL = 100
     EVAL_BATCHES = 20
     EVAL_SAMPLES = 10
     
-    # --- 2. 准备模型和数据 ---
+    # --- 2. setup model and data ---
     model = BayesianTransformer(vocab_size=VOCAB_SIZE, d_model=D_MODEL, max_seq_len=SEQ_LEN, prior_sigma=0.01).to(device)
     # note that mu uses LeCun initialization ~U[-1/sqrt(in_features),1/sqrt(in_features)], here is U[-0.0625,0.0625]
     train_data_generator = SyntheticDataGenerator(meta_path=META_PATH, T=SEQ_LEN, k=K_TRIGGERS, alpha=ALPHA)
     test_data_generator = SyntheticDataGenerator(meta_path=META_PATH, T=SEQ_LEN, k=K_TRIGGERS, alpha=0.0)
+    # didnt use test_data_generator
     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=LEARNING_RATE)
     kl_loss_fn = bnn.BKLLoss(reduction='mean', last_layer_only=False)
     ce_loss_fn = torch.nn.CrossEntropyLoss()
 
-    # --- 3. 准备结果记录 ---
+    # --- 3. prepare results log ---
     results = {
         'train_steps': [], 'eval_steps': [], 'pred_losses': [], 'kl_losses': [],
         'eval_accuracies': [],
@@ -170,10 +165,10 @@ def main():
                     'grad_clip': GRAD_CLIP_VALUE}
     }
     
-    # --- 4. 训练循环 ---
-    print(f"开始训练... (LR={LEARNING_RATE}, GradClip={GRAD_CLIP_VALUE})")
+    # --- 4. training loop ---
+    print(f"Start training... (LR={LEARNING_RATE}, GradClip={GRAD_CLIP_VALUE})")
     model.train()
-    progress_bar = tqdm(range(NUM_BATCHES), desc="训练中", unit="batch")
+    progress_bar = tqdm(range(NUM_BATCHES), desc="training", unit="batch")
 
     for i in progress_bar:
         step = i + 1
@@ -184,9 +179,9 @@ def main():
             input_tokens, target_tokens, device, GRAD_CLIP_VALUE
         )
         
-        # 检查损失是否为NaN或inf，如果是则提前停止
+        # check is loss is NaN or inf
         if not (np.isfinite(pred_loss) and np.isfinite(kl)):
-            print(f"\n在第 {step} 步检测到无效的损失值！训练提前终止。")
+            print(f"\nAt {step} step we find invalid loss！Training stops unexpectedly here.")
             print(f"Pred Loss: {pred_loss}, KL Loss: {kl}")
             break
             
@@ -196,7 +191,7 @@ def main():
         
         progress_bar.set_postfix(pred_loss=f"{pred_loss:.3f}", kl_loss=f"{kl:.3f}")
 
-        # 评估步骤
+        # evaluation (using train data generator, alpha is not equal to zero here, at least by now) TODO
         if step % EVAL_INTERVAL == 0 or step == NUM_BATCHES:
             eval_accuracy = evaluate(
                 model, train_data_generator, device, 
@@ -204,9 +199,7 @@ def main():
             )
             variances = get_mean_variances(model)
             
-            # <--- 修改点2: 清晰地打印评估结果 --->
-            # 暂停进度条，打印评估信息，然后恢复
-            progress_bar.write(f"--- Step {step} 评估 --- "
+            progress_bar.write(f"--- Step {step} Evaluation --- "
                                f"Eval Accuracy: {eval_accuracy:.4f} ---")
             
             results['eval_steps'].append(step)
@@ -214,14 +207,14 @@ def main():
             for name, var in variances.items():
                 results['mean_variances'][name].append(var)
     
-    print("训练完成！")
+    print("Training is Done!!")
 
     # --- 5. 保存结果 ---
     torch.save(model.state_dict(), os.path.join(SAVE_DIR, 'final_model.pth'))
     with open(os.path.join(SAVE_DIR, 'results_data.pkl'), 'wb') as f:
         pickle.dump(results, f)
     plot_and_save_curves(results, SAVE_DIR)
-    print(f"所有结果已成功保存到: {SAVE_DIR}")
+    print(f"All results have been successfully saved to: {SAVE_DIR}")
 
 if __name__ == '__main__':
     main()
