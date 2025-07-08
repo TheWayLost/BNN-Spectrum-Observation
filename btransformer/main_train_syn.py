@@ -153,6 +153,7 @@ def main():
     
     # --- 2. 准备模型和数据 ---
     model = BayesianTransformer(vocab_size=VOCAB_SIZE, d_model=D_MODEL, max_seq_len=SEQ_LEN, prior_sigma=0.01).to(device)
+    # note that mu uses LeCun initialization ~U[-1/sqrt(in_features),1/sqrt(in_features)], here is U[-0.0625,0.0625]
     train_data_generator = SyntheticDataGenerator(meta_path=META_PATH, T=SEQ_LEN, k=K_TRIGGERS, alpha=ALPHA)
     test_data_generator = SyntheticDataGenerator(meta_path=META_PATH, T=SEQ_LEN, k=K_TRIGGERS, alpha=0.0)
     optimizer = optim.Adam(filter(lambda p: p.requires_grad, model.parameters()), lr=LEARNING_RATE)
